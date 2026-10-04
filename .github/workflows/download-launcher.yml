@@ -1,0 +1,85 @@
+name: Publish current single-file download launcher
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  launcher:
+    runs-on: windows-latest
+    steps:
+      - name: Build launcher with verified base maps and current app update
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $tag=$env:RELEASE_TAG
+          if(!$tag){$tag=gh release view --json tagName --jq .tagName}
+          if($tag -notmatch '^desktop-v\d+\.\d+\.\d+$'){throw 'Invalid release tag'}
+          $version=$tag.Substring(9)
+          $assets=gh api "repos/$env:GH_REPO/releases/tags/$tag" | ConvertFrom-Json
+          $update=$assets.assets | Where-Object name -eq "GENIX-Yemen-Map-$version-Update-x64.exe"
+          if(!$update -or $update.digest -notmatch '^sha256:[a-f0-9]{64}$'){throw 'Verified application update asset is required'}
+          $base='https://github.com/'+$env:GH_REPO+'/releases/download/desktop-v1.2.2/'
+          $files=@(
+            @('GENIX-Yemen-Map-1.2.2-Setup-x64-1.bin','e6753462788eba33886b8b2c464e3979e73f5dc8c4cf4e018749f58468cd4fc2'),
+            @('GENIX-Yemen-Map-1.2.2-Setup-x64-2.bin','505dfe3c455e7819c26fb318291f01f53a670589972ebc6e9146a0c61bce56d7'),
+            @('GENIX-Yemen-Map-1.2.2-Setup-x64-3.bin','2c49a3ebdf11da34d57746eadac01f20d57778f565b75bc09bb1c4a14e55dc19'),
+            @('GENIX-Yemen-Map-1.2.2-Setup-x64-4.bin','57295823c1c22737f7a30c51b00f957963f69db9bb211dc4cd66849edac4f7ac'),
+            @('GENIX-Yemen-Map-1.2.2-Setup-x64.exe','29e083e561e8edf0d4e69772b965598aff568f2d560694a5f38d91be475008ac'))
+          $adds=($files | ForEach-Object {"  MapDownloads.Add('$base$($_[0])', '$($_[0])', '$($_[1])');"}) -join "`n"
+          $adds+="`n  MapDownloads.Add('$($update.browser_download_url)', '$($update.name)', '$($update.digest.Substring(7))');"
+          @'
+          [Setup]
+          AppId=com.genix.yemenmap.download
+          AppName=GENIX Yemen Map
+          AppVersion=APP_VERSION
+          AppPublisher=GENIX
+          CreateAppDir=no
+          Uninstallable=no
+          PrivilegesRequired=lowest
+          ArchitecturesAllowed=x64compatible
+          DisableDirPage=yes
+          DisableProgramGroupPage=yes
+          OutputDir=launcher-out
+          OutputBaseFilename=GENIX-Yemen-Map-Download
+          WizardStyle=modern
+          [Messages]
+          WelcomeLabel1=تحميل GENIX Yemen Map
+          WelcomeLabel2=سيتم تحميل البرنامج وصور اليمن والتضاريس كاملة من GitHub، ثم تثبيت أحدث نسخة. بعد التثبيت تعمل الخرائط المحلية دون الإنترنت. التحديثات التالية من زر تحديث داخل البرنامج.
+          ButtonInstall=تحميل وتثبيت
+          ButtonCancel=إلغاء
+          [Run]
+          Filename: "{tmp}\GENIX-Yemen-Map-1.2.2-Setup-x64.exe"; Parameters: "/SILENT /SUPPRESSMSGBOXES /NORESTART"; Flags: waituntilterminated
+          Filename: "{tmp}\GENIX-Yemen-Map-APP_VERSION-Update-x64.exe"; Parameters: "/SUPPRESSMSGBOXES /NORESTART"; Flags: waituntilterminated
+          [Code]
+          var MapDownloads: TDownloadWizardPage;
+          procedure InitializeWizard;
+          begin
+            MapDownloads := CreateDownloadPage('تحميل البرنامج والخرائط', 'انتظر اكتمال التنزيل والتحقق من الملفات.', nil);
+            MapDownloads.ShowBaseNameInsteadOfUrl := True;
+          end;
+          function PrepareToInstall(var NeedsRestart: Boolean): String;
+          begin
+            Result := '';
+            MapDownloads.Clear;
+          DOWNLOADS
+            MapDownloads.Show;
+            try
+              try
+                MapDownloads.Download;
+              except
+                Result := 'تعذر إكمال التحميل: ' + GetExceptionMessage;
+              end;
+            finally
+              MapDownloads.Hide;
+            end;
+          end;
+          '@.Replace('APP_VERSION',$version).Replace('DOWNLOADS',$adds) | Set-Content -Encoding utf8 launcher.iss
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' launcher.iss
+          if($LASTEXITCODE -ne 0){throw 'Launcher compilation failed'}
+          gh release upload $tag launcher-out/GENIX-Yemen-Map-Download.exe --clobber
+          if($LASTEXITCODE -ne 0){throw 'Launcher publishing failed'}
